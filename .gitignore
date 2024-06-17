@@ -1,0 +1,5 @@
+.vscode/
+.idea/
+
+webserver.o
+webserver
