@@ -2,6 +2,7 @@
 /* This is a simple webserver copy the webserver creeated 1999 by J. David
  * Blackstone. Created July 2024. It is compiled by gcc
  * (Ubuntu 13.2.0-23ubuntu4) 13.2.0 in Ubuntu 24.10.
+ * macOS 14.5 23F79 arm64
  */
 #include <arpa/inet.h>
 #include <ctype.h>
