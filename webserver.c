@@ -1,9 +1,3 @@
-#/* Touero's webserver */
-/* This is a simple webserver copy the webserver creeated 1999 by J. David
- * Blackstone. Created July 2024. It is compiled by gcc
- * (Ubuntu 13.2.0-23ubuntu4) 13.2.0 in Ubuntu 24.10.
- * macOS 14.5 23F79 arm64
- */
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <netinet/in.h>
@@ -16,22 +10,16 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #define ISspace(x) isspace((int)(x))
 
 #define SERVER_STRING "Server: jdbhttpd/0.1.0\r\n"
-#define STDIN 0
-#define STDOUT 1
-#define STDERR 2
 
 void accept_request(void *);
 void bad_request(int);
 void cat(int, FILE *);
-void cannot_execute(int);
 void error_die(const char *);
-void execute_cgi(int, const char *, const char *, const char *);
 int get_line(int, char *, int);
 void headers(int, const char *);
 void not_found(int);
@@ -53,9 +41,6 @@ void accept_request(void *arg) {
   char path[512];
   size_t i, j;
   struct stat st;
-  int cgi = 0; /* becomes true if server decides this is a CGI
-                * program */
-  char *query_string = NULL;
 
   numchars = get_line(client, buf, sizeof(buf));
   i = 0;
@@ -67,13 +52,10 @@ void accept_request(void *arg) {
   j = i;
   method[i] = '\0';
 
-  if (strcasecmp(method, "GET") && strcasecmp(method, "POST")) {
+  if (strcasecmp(method, "GET")) {
     unimplemented(client);
     return;
   }
-
-  if (strcasecmp(method, "POST") == 0)
-    cgi = 1;
 
   i = 0;
   while (ISspace(buf[j]) && (j < numchars))
@@ -85,17 +67,6 @@ void accept_request(void *arg) {
   }
   url[i] = '\0';
 
-  if (strcasecmp(method, "GET") == 0) {
-    query_string = url;
-    while ((*query_string != '?') && (*query_string != '\0'))
-      query_string++;
-    if (*query_string == '?') {
-      cgi = 1;
-      *query_string = '\0';
-      query_string++;
-    }
-  }
-
   sprintf(path, "htdocs%s", url);
   if (path[strlen(path) - 1] == '/')
     strcat(path, "index.html");
@@ -106,13 +77,7 @@ void accept_request(void *arg) {
   } else {
     if ((st.st_mode & S_IFMT) == S_IFDIR)
       strcat(path, "/index.html");
-    if ((st.st_mode & S_IXUSR) || (st.st_mode & S_IXGRP) ||
-        (st.st_mode & S_IXOTH))
-      cgi = 1;
-    if (!cgi)
-      serve_file(client, path);
-    else
-      execute_cgi(client, path, method, query_string);
+    serve_file(client, path);
   }
 
   close(client);
@@ -155,23 +120,6 @@ void cat(int client, FILE *resource) {
 }
 
 /**********************************************************************/
-/* Inform the client that a CGI script could not be executed.
- * Parameter: the client socket descriptor. */
-/**********************************************************************/
-void cannot_execute(int client) {
-  char buf[1024];
-
-  sprintf(buf, "HTTP/1.0 500 Internal Server Error\r\n");
-  send(client, buf, strlen(buf), 0);
-  sprintf(buf, "Content-type: text/html\r\n");
-  send(client, buf, strlen(buf), 0);
-  sprintf(buf, "\r\n");
-  send(client, buf, strlen(buf), 0);
-  sprintf(buf, "<P>Error prohibited CGI execution.\r\n");
-  send(client, buf, strlen(buf), 0);
-}
-
-/**********************************************************************/
 /* Print out an error message with perror() (for system errors; based
  * on value of errno, which indicates system call errors) and exit the
  * program indicating an error. */
@@ -179,99 +127,6 @@ void cannot_execute(int client) {
 void error_die(const char *sc) {
   perror(sc);
   exit(1);
-}
-
-/**********************************************************************/
-/* Execute a CGI script.  Will need to set environment variables as
- * appropriate.
- * Parameters: client socket descriptor
- *             path to the CGI script */
-/**********************************************************************/
-void execute_cgi(int client, const char *path, const char *method,
-                 const char *query_string) {
-  char buf[1024];
-  int cgi_output[2];
-  int cgi_input[2];
-  pid_t pid;
-  int status;
-  int i;
-  char c;
-  int numchars = 1;
-  int content_length = -1;
-
-  buf[0] = 'A';
-  buf[1] = '\0';
-  if (strcasecmp(method, "GET") == 0)
-    while ((numchars > 0) && strcmp("\n", buf)) /* read & discard headers */
-      numchars = get_line(client, buf, sizeof(buf));
-  else if (strcasecmp(method, "POST") == 0) /*POST*/
-  {
-    numchars = get_line(client, buf, sizeof(buf));
-    while ((numchars > 0) && strcmp("\n", buf)) {
-      buf[15] = '\0';
-      if (strcasecmp(buf, "Content-Length:") == 0)
-        content_length = atoi(&(buf[16]));
-      numchars = get_line(client, buf, sizeof(buf));
-    }
-    if (content_length == -1) {
-      bad_request(client);
-      return;
-    }
-  } else /*HEAD or other*/
-  {
-  }
-
-  if (pipe(cgi_output) < 0) {
-    cannot_execute(client);
-    return;
-  }
-  if (pipe(cgi_input) < 0) {
-    cannot_execute(client);
-    return;
-  }
-
-  if ((pid = fork()) < 0) {
-    cannot_execute(client);
-    return;
-  }
-  sprintf(buf, "HTTP/1.0 200 OK\r\n");
-  send(client, buf, strlen(buf), 0);
-  if (pid == 0) /* child: CGI script */
-  {
-    char meth_env[255];
-    char query_env[255];
-    char length_env[255];
-
-    dup2(cgi_output[1], STDOUT);
-    dup2(cgi_input[0], STDIN);
-    close(cgi_output[0]);
-    close(cgi_input[1]);
-    sprintf(meth_env, "REQUEST_METHOD=%s", method);
-    putenv(meth_env);
-    if (strcasecmp(method, "GET") == 0) {
-      sprintf(query_env, "QUERY_STRING=%s", query_string);
-      putenv(query_env);
-    } else { /* POST */
-      sprintf(length_env, "CONTENT_LENGTH=%d", content_length);
-      putenv(length_env);
-    }
-    execl(path, path, (char *)NULL);
-    exit(0);
-  } else { /* parent */
-    close(cgi_output[1]);
-    close(cgi_input[0]);
-    if (strcasecmp(method, "POST") == 0)
-      for (i = 0; i < content_length; i++) {
-        recv(client, &c, 1, 0);
-        write(cgi_input[1], &c, 1);
-      }
-    while (read(cgi_output[0], &c, 1) > 0)
-      send(client, &c, 1, 0);
-
-    close(cgi_output[0]);
-    close(cgi_input[1]);
-    waitpid(pid, &status, 0);
-  }
 }
 
 /**********************************************************************/
@@ -294,11 +149,9 @@ int get_line(int sock, char *buf, int size) {
 
   while ((i < size - 1) && (c != '\n')) {
     n = recv(sock, &c, 1, 0);
-    /* DEBUG printf("%02X\n", c); */
     if (n > 0) {
       if (c == '\r') {
         n = recv(sock, &c, 1, MSG_PEEK);
-        /* DEBUG printf("%02X\n", c); */
         if ((n > 0) && (c == '\n'))
           recv(sock, &c, 1, 0);
         else
@@ -439,41 +292,40 @@ void unimplemented(int client) {
   send(client, buf, strlen(buf), 0);
   sprintf(buf, "\r\n");
   send(client, buf, strlen(buf), 0);
-  sprintf(buf, "<HTML><HEAD><TITLE>Method Not Implemented\r\n");
+  sprintf(buf, "<HTML><TITLE>Method Not Implemented</TITLE>\r\n");
   send(client, buf, strlen(buf), 0);
-  sprintf(buf, "</TITLE></HEAD>\r\n");
-  send(client, buf, strlen(buf), 0);
-  sprintf(buf, "<BODY><P>HTTP request method not supported.\r\n");
+  sprintf(buf, "<BODY><P>The method is not supported.\r\n");
   send(client, buf, strlen(buf), 0);
   sprintf(buf, "</BODY></HTML>\r\n");
   send(client, buf, strlen(buf), 0);
 }
 
 /**********************************************************************/
-
+/* Main function to initialize the server and handle client requests. */
+/**********************************************************************/
 int main(void) {
-  int server_sock = -1;
   u_int16_t port = 2518;
+  int server_sock = -1;
   int client_sock = -1;
   struct sockaddr_in client_name;
   socklen_t client_name_len = sizeof(client_name);
   pthread_t newthread;
 
   server_sock = startup(&port);
-  printf("httpd running on port %d\n", port);
+  printf("httpd is running on port %d\n", port);
 
   while (1) {
-    client_sock =
-        accept(server_sock, (struct sockaddr *)&client_name, &client_name_len);
+    client_sock = accept(server_sock, (struct sockaddr *)&client_name, &client_name_len);
     if (client_sock == -1)
       error_die("accept");
-    /* accept_request(&client_sock); */
-    if (pthread_create(&newthread, NULL, (void *)accept_request,
-                       (void *)(intptr_t)client_sock) != 0)
+
+    if (pthread_create(&newthread, NULL, (void *)accept_request, (void *)(intptr_t)client_sock) != 0)
       perror("pthread_create");
+
+    pthread_detach(newthread); /* Don't need to join the thread */
   }
 
   close(server_sock);
-
-  return (0);
+  return 0;
 }
+
